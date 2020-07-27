@@ -194,9 +194,8 @@ namespace SQLite
 		public bool TimeExecution { get; set; }
 
 		/// <summary>
-		/// Whether to writer queries to <see cref="Tracer"/> during execution.
+		/// Whether to write queries to <see cref="Tracer"/> during execution.
 		/// </summary>
-		/// <value>The tracer.</value>
 		public bool Trace { get; set; }
 
 		/// <summary>
@@ -315,10 +314,11 @@ namespace SQLite
 			_open = true;
 
 			StoreDateTimeAsTicks = connectionString.StoreDateTimeAsTicks;
+			StoreTimeSpanAsTicks = connectionString.StoreTimeSpanAsTicks;
 			DateTimeStringFormat = connectionString.DateTimeStringFormat;
 			DateTimeStyle = connectionString.DateTimeStyle;
 
-			BusyTimeout = TimeSpan.FromSeconds (0.1);
+			BusyTimeout = TimeSpan.FromSeconds (1.0);
 			Tracer = line => Debug.WriteLine (line);
 
 			connectionString.PreKeyAction?.Invoke (this);
@@ -337,7 +337,7 @@ namespace SQLite
 		/// <summary>
 		/// Enables the write ahead logging. WAL is significantly faster in most scenarios
 		/// by providing better concurrency and better disk IO performance than the normal
-		/// jounral mode. You only need to call this function once in the lifetime of the database.
+		/// journal mode. You only need to call this function once in the lifetime of the database.
 		/// </summary>
 		public void EnableWriteAheadLogging()
 		{
@@ -381,7 +381,7 @@ namespace SQLite
 		void SetKey (byte[] key)
 		{
 			if (key == null) throw new ArgumentNullException (nameof (key));
-			if (key.Length != 32) throw new ArgumentException ("Key must be 32 bytes (256-bit)", nameof(key));
+			if (key.Length != 32) throw new ArgumentException ("Key must be 32 bytes (256-bit)", nameof (key));
 			var s = String.Join ("", key.Select (x => x.ToString ("X2")));
 			ExecuteScalar<string> ("pragma key = \"x'" + s + "'\"");
 		}
@@ -872,6 +872,33 @@ namespace SQLite
 		}
 
 		/// <summary>
+		/// Creates a new SQLiteCommand given the command text with named arguments. Place a "[@:$]VVV"
+		/// in the command text for each of the arguments. VVV represents an alphanumeric identifier.
+		/// For example, @name :name and $name can all be used in the query.
+		/// </summary>
+		/// <param name="cmdText">
+		/// The fully escaped SQL.
+		/// </param>
+		/// <param name="args">
+		/// Arguments to substitute for the occurences of "[@:$]VVV" in the command text.
+		/// </param>
+		/// <returns>
+		/// A <see cref="SQLiteCommand" />
+		/// </returns>
+		public SQLiteCommand CreateCommand (string cmdText, Dictionary<string, object> args)
+		{
+			if (!_open)
+				throw SQLiteException.New (SQLite3.Result.Error, "Cannot create commands from unopened database");
+
+			SQLiteCommand cmd = NewCommand ();
+			cmd.CommandText = cmdText;
+			foreach (var kv in args) {
+				cmd.Bind (kv.Key, kv.Value);
+			}
+			return cmd;
+		}
+
+		/// <summary>
 		/// Creates a SQLiteCommand given the command text (SQL) with arguments. Place a '?'
 		/// in the command text for each of the arguments and then executes that command.
 		/// Use this method instead of Query when you don't expect rows back. Such cases include
@@ -969,6 +996,26 @@ namespace SQLite
 		{
 			var cmd = CreateCommand (query, args);
 			return cmd.ExecuteQuery<T> ();
+		}
+
+		/// <summary>
+		/// Creates a SQLiteCommand given the command text (SQL) with arguments. Place a '?'
+		/// in the command text for each of the arguments and then executes that command.
+		/// It returns the first column of each row of the result.
+		/// </summary>
+		/// <param name="query">
+		/// The fully escaped SQL.
+		/// </param>
+		/// <param name="args">
+		/// Arguments to substitute for the occurences of '?' in the query.
+		/// </param>
+		/// <returns>
+		/// An enumerable with one result for the first column of each row returned by the query.
+		/// </returns>
+		public List<T> QueryScalars<T> (string query, params object[] args)
+		{
+			var cmd = CreateCommand (query, args);
+			return cmd.ExecuteQueryScalars<T> ().ToList ();
 		}
 
 		/// <summary>
@@ -2813,7 +2860,7 @@ namespace SQLite
 				}
 			}
 
-			throw SQLiteException.New (r, r.ToString ());
+			throw SQLiteException.New (r, SQLite3.GetErrmsg (_conn.Handle));
 		}
 
 		public IEnumerable<T> ExecuteDeferredQuery<T> ()
@@ -2893,7 +2940,10 @@ namespace SQLite
 				var r = SQLite3.Step (stmt);
 				if (r == SQLite3.Result.Row) {
 					var colType = SQLite3.ColumnType (stmt, 0);
-					val = (T)ReadCol (stmt, 0, colType, typeof (T));
+					var colval = ReadCol (stmt, 0, colType, typeof (T));
+					if (colval != null) {
+						val = (T)colval;
+					}
 				}
 				else if (r == SQLite3.Result.Done) {
 				}
@@ -2906,6 +2956,32 @@ namespace SQLite
 			}
 
 			return val;
+		}
+
+		public IEnumerable<T> ExecuteQueryScalars<T> ()
+		{
+			if (_conn.Trace) {
+				_conn.Tracer?.Invoke ("Executing Query: " + this);
+			}
+			var stmt = Prepare ();
+			try {
+				if (SQLite3.ColumnCount (stmt) < 1) {
+					throw new InvalidOperationException ("QueryScalars should return at least one column");
+				}
+				while (SQLite3.Step (stmt) == SQLite3.Result.Row) {
+					var colType = SQLite3.ColumnType (stmt, 0);
+					var val = ReadCol (stmt, 0, colType, typeof (T));
+					if (val == null) {
+						yield return default (T);
+					}
+					else {
+						yield return (T)val;
+					}
+				}
+			}
+			finally {
+				Finalize (stmt);
+			}
 		}
 
 		public void Bind (string name, object val)
@@ -3139,18 +3215,18 @@ namespace SQLite
 					var text = SQLite3.ColumnString (stmt, index);
 					return new Guid (text);
 				}
-                else if (clrType == typeof(Uri)) {
-                    var text = SQLite3.ColumnString(stmt, index);
-                    return new Uri(text);
-                }
+				else if (clrType == typeof(Uri)) {
+					var text = SQLite3.ColumnString(stmt, index);
+					return new Uri(text);
+				}
 				else if (clrType == typeof (StringBuilder)) {
 					var text = SQLite3.ColumnString (stmt, index);
 					return new StringBuilder (text);
 				}
 				else if (clrType == typeof(UriBuilder)) {
-                    var text = SQLite3.ColumnString(stmt, index);
-                    return new UriBuilder(text);
-                }
+					var text = SQLite3.ColumnString(stmt, index);
+					return new UriBuilder(text);
+				}
 				else {
 					throw new NotSupportedException ("Don't know how to read " + clrType);
 				}
@@ -3219,7 +3295,7 @@ namespace SQLite
 			}
 			else {
 				SQLite3.Reset (Statement);
-				throw SQLiteException.New (r, r.ToString ());
+				throw SQLiteException.New (r, SQLite3.GetErrmsg (Connection.Handle));
 			}
 		}
 
@@ -3663,6 +3739,9 @@ namespace SQLite
 				}
 				else if (call.Method.Name == "Replace" && args.Length == 2) {
 					sqlCall = "(replace(" + obj.CommandText + "," + args[0].CommandText + "," + args[1].CommandText + "))";
+				}
+				else if (call.Method.Name == "IsNullOrEmpty" && args.Length == 1) {
+					sqlCall = "(" + args[0].CommandText + " is null or" + args[0].CommandText + " ='' )";
 				}
 				else {
 					sqlCall = call.Method.Name.ToLower () + "(" + string.Join (",", args.Select (a => a.CommandText).ToArray ()) + ")";
@@ -4261,7 +4340,7 @@ namespace SQLite
 
 		public static string GetErrmsg (Sqlite3DatabaseHandle db)
 		{
-			return Sqlite3.sqlite3_errmsg (db);
+			return Sqlite3.sqlite3_errmsg (db).utf8_to_string();
 		}
 
 		public static int BindParameterIndex (Sqlite3Statement stmt, string name)
@@ -4318,12 +4397,12 @@ namespace SQLite
 
 		public static string ColumnName (Sqlite3Statement stmt, int index)
 		{
-			return Sqlite3.sqlite3_column_name (stmt, index);
+			return Sqlite3.sqlite3_column_name (stmt, index).utf8_to_string ();
 		}
 
 		public static string ColumnName16 (Sqlite3Statement stmt, int index)
 		{
-			return Sqlite3.sqlite3_column_name (stmt, index);
+			return Sqlite3.sqlite3_column_name (stmt, index).utf8_to_string ();
 		}
 
 		public static ColType ColumnType (Sqlite3Statement stmt, int index)
@@ -4348,17 +4427,17 @@ namespace SQLite
 
 		public static string ColumnText (Sqlite3Statement stmt, int index)
 		{
-			return Sqlite3.sqlite3_column_text (stmt, index);
+			return Sqlite3.sqlite3_column_text (stmt, index).utf8_to_string ();
 		}
 
 		public static string ColumnText16 (Sqlite3Statement stmt, int index)
 		{
-			return Sqlite3.sqlite3_column_text (stmt, index);
+			return Sqlite3.sqlite3_column_text (stmt, index).utf8_to_string ();
 		}
 
 		public static byte[] ColumnBlob (Sqlite3Statement stmt, int index)
 		{
-			return Sqlite3.sqlite3_column_blob (stmt, index);
+			return Sqlite3.sqlite3_column_blob (stmt, index).ToArray ();
 		}
 
 		public static int ColumnBytes (Sqlite3Statement stmt, int index)
@@ -4368,7 +4447,7 @@ namespace SQLite
 
 		public static string ColumnString (Sqlite3Statement stmt, int index)
 		{
-			return Sqlite3.sqlite3_column_text (stmt, index);
+			return Sqlite3.sqlite3_column_text (stmt, index).utf8_to_string ();
 		}
 
 		public static byte[] ColumnByteArray (Sqlite3Statement stmt, int index)

@@ -129,7 +129,7 @@ namespace SQLite
 		/// <summary>
 		/// Enables the write ahead logging. WAL is significantly faster in most scenarios
 		/// by providing better concurrency and better disk IO performance than the normal
-		/// jounral mode. You only need to call this function once in the lifetime of the database.
+		/// journal mode. You only need to call this function once in the lifetime of the database.
 		/// </summary>
 		public Task EnableWriteAheadLoggingAsync ()
 		{
@@ -203,6 +203,11 @@ namespace SQLite
 			return SQLiteConnectionPool.Shared.GetConnection (_connectionString);
 		}
 
+		SQLiteConnectionWithLock GetConnectionAndTransactionLock (out object transactionLock)
+		{
+			return SQLiteConnectionPool.Shared.GetConnectionAndTransactionLock (_connectionString, out transactionLock);
+		}
+
 		/// <summary>
 		/// Closes any pooled connections used by the database.
 		/// </summary>
@@ -229,6 +234,18 @@ namespace SQLite
 				var conn = GetConnection ();
 				using (conn.Lock ()) {
 					return write (conn);
+				}
+			}, CancellationToken.None, TaskCreationOptions.DenyChildAttach, TaskScheduler.Default);
+		}
+
+		Task<T> TransactAsync<T> (Func<SQLiteConnectionWithLock, T> transact)
+		{
+			return Task.Factory.StartNew (() => {
+				var conn = GetConnectionAndTransactionLock (out var transactionLock);
+				lock (transactionLock) {
+					using (conn.Lock ()) {
+						return transact (conn);
+					}
 				}
 			}, CancellationToken.None, TaskCreationOptions.DenyChildAttach, TaskScheduler.Default);
 		}
@@ -984,7 +1001,7 @@ namespace SQLite
 		/// </param>
 		public Task RunInTransactionAsync (Action<SQLiteConnection> action)
 		{
-			return WriteAsync<object> (conn => {
+			return TransactAsync<object> (conn => {
 				conn.BeginTransaction ();
 				try {
 					action (conn);
@@ -1053,12 +1070,31 @@ namespace SQLite
 		/// Arguments to substitute for the occurences of '?' in the query.
 		/// </param>
 		/// <returns>
-		/// An enumerable with one result for each row returned by the query.
+		/// A list with one result for each row returned by the query.
 		/// </returns>
 		public Task<List<T>> QueryAsync<T> (string query, params object[] args)
 			where T : new()
 		{
 			return ReadAsync (conn => conn.Query<T> (query, args));
+		}
+
+		/// <summary>
+		/// Creates a SQLiteCommand given the command text (SQL) with arguments. Place a '?'
+		/// in the command text for each of the arguments and then executes that command.
+		/// It returns the first column of each row of the result.
+		/// </summary>
+		/// <param name="query">
+		/// The fully escaped SQL.
+		/// </param>
+		/// <param name="args">
+		/// Arguments to substitute for the occurences of '?' in the query.
+		/// </param>
+		/// <returns>
+		/// A list with one result for the first column of each row returned by the query.
+		/// </returns>
+		public Task<List<T>> QueryScalarsAsync<T> (string query, params object[] args)
+		{
+			return ReadAsync (conn => conn.QueryScalars<T> (query, args));
 		}
 
 		/// <summary>
@@ -1322,39 +1358,30 @@ namespace SQLite
 	{
 		class Entry
 		{
-			WeakReference<SQLiteConnectionWithLock> connection;
+			public SQLiteConnectionWithLock Connection { get; private set; }
 
 			public SQLiteConnectionString ConnectionString { get; }
+
+			public object TransactionLock { get; } = new object ();
 
 			public Entry (SQLiteConnectionString connectionString)
 			{
 				ConnectionString = connectionString;
-			}
+				Connection = new SQLiteConnectionWithLock (ConnectionString);
 
-			public SQLiteConnectionWithLock Connect ()
-			{
-				SQLiteConnectionWithLock c = null;
-				var wc = connection;
-				if (wc == null || !wc.TryGetTarget (out c)) {
-					c = new SQLiteConnectionWithLock (ConnectionString);
-
-					// If the database is FullMutex, then we don't need to bother locking
-					if (ConnectionString.OpenFlags.HasFlag (SQLiteOpenFlags.FullMutex)) {
-						c.SkipLock = true;
-					}
-
-					connection = new WeakReference<SQLiteConnectionWithLock> (c);
+				// If the database is FullMutex, then we don't need to bother locking
+				if (ConnectionString.OpenFlags.HasFlag (SQLiteOpenFlags.FullMutex)) {
+					Connection.SkipLock = true;
 				}
-				return c;
 			}
 
 			public void Close ()
 			{
-				var wc = connection;
-				if (wc != null && wc.TryGetTarget (out var c)) {
-					c.Close ();
+				var wc = Connection;
+				Connection = null;
+				if (wc != null) {
+					wc.Close ();
 				}
-				connection = null;
 			}
 		}
 
@@ -1374,15 +1401,23 @@ namespace SQLite
 
 		public SQLiteConnectionWithLock GetConnection (SQLiteConnectionString connectionString)
 		{
+			return GetConnectionAndTransactionLock (connectionString, out var _);
+		}
+
+		public SQLiteConnectionWithLock GetConnectionAndTransactionLock (SQLiteConnectionString connectionString, out object transactionLock)
+		{
 			var key = connectionString.UniqueKey;
 			Entry entry;
 			lock (_entriesLock) {
 				if (!_entries.TryGetValue (key, out entry)) {
+					// The opens the database while we're locked
+					// This is to ensure another thread doesn't get an unopened database
 					entry = new Entry (connectionString);
 					_entries[key] = entry;
 				}
+				transactionLock = entry.TransactionLock;
+				return entry.Connection;
 			}
-			return entry.Connect ();
 		}
 
 		public void CloseConnection (SQLiteConnectionString connectionString)
