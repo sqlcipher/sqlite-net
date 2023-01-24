@@ -1,5 +1,5 @@
 //
-// Copyright (c) 2012-2019 Krueger Systems, Inc.
+// Copyright (c) 2012-2021 Krueger Systems, Inc.
 // 
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -402,6 +402,7 @@ namespace SQLite
 		/// <param name="tableName">Name of the database table</param>
 		/// <param name="columnName">Name of the column to index</param>
 		/// <param name="unique">Whether the index should be unique</param>
+		/// <returns>Zero on success.</returns>
 		public Task<int> CreateIndexAsync (string tableName, string columnName, bool unique = false)
 		{
 			return WriteAsync (conn => conn.CreateIndex (tableName, columnName, unique));
@@ -414,6 +415,7 @@ namespace SQLite
 		/// <param name="tableName">Name of the database table</param>
 		/// <param name="columnName">Name of the column to index</param>
 		/// <param name="unique">Whether the index should be unique</param>
+		/// <returns>Zero on success.</returns>
 		public Task<int> CreateIndexAsync (string indexName, string tableName, string columnName, bool unique = false)
 		{
 			return WriteAsync (conn => conn.CreateIndex (indexName, tableName, columnName, unique));
@@ -425,6 +427,7 @@ namespace SQLite
 		/// <param name="tableName">Name of the database table</param>
 		/// <param name="columnNames">An array of column names to index</param>
 		/// <param name="unique">Whether the index should be unique</param>
+		/// <returns>Zero on success.</returns>
 		public Task<int> CreateIndexAsync (string tableName, string[] columnNames, bool unique = false)
 		{
 			return WriteAsync (conn => conn.CreateIndex (tableName, columnNames, unique));
@@ -437,6 +440,7 @@ namespace SQLite
 		/// <param name="tableName">Name of the database table</param>
 		/// <param name="columnNames">An array of column names to index</param>
 		/// <param name="unique">Whether the index should be unique</param>
+		/// <returns>Zero on success.</returns>
 		public Task<int> CreateIndexAsync (string indexName, string tableName, string[] columnNames, bool unique = false)
 		{
 			return WriteAsync (conn => conn.CreateIndex (indexName, tableName, columnNames, unique));
@@ -449,14 +453,15 @@ namespace SQLite
 		/// <typeparam name="T">Type to reflect to a database table.</typeparam>
 		/// <param name="property">Property to index</param>
 		/// <param name="unique">Whether the index should be unique</param>
+		/// <returns>Zero on success.</returns>
 		public Task<int> CreateIndexAsync<T> (Expression<Func<T, object>> property, bool unique = false)
 		{
 			return WriteAsync (conn => conn.CreateIndex (property, unique));
 		}
 
 		/// <summary>
-		/// Inserts the given object and retrieves its
-		/// auto incremented primary key if it has one.
+        /// Inserts the given object and (and updates its
+		/// auto incremented primary key if it has one).
 		/// </summary>
 		/// <param name="obj">
 		/// The object to insert.
