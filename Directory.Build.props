@@ -1,6 +1,6 @@
 <Project>
     <PropertyGroup>
-        <VersionPrefix>1.8</VersionPrefix>
+        <VersionPrefix>1.9</VersionPrefix>
         <VersionSuffix></VersionSuffix>
 
         <PackageIcon>Logo-low.png</PackageIcon>
@@ -12,6 +12,8 @@
         <Company>Krueger Systems, Inc.</Company>
 
         <Deterministic>true</Deterministic>
+
+        <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
     </PropertyGroup>
 	 <ItemGroup>
 		<None Include="..\Logo-low.png" Pack="true" PackagePath=""/>
